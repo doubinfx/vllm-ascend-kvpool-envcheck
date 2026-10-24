@@ -1,0 +1,19 @@
+{
+  "schema_version": "4.0",
+  "artifacts": {
+    "mem_scan_a3": {
+      "path": "artifacts/mem_scan.py",
+      "source": "https://gitcode.com/Ascend/memfabric_hybrid/blob/develop/src/smem/python/memfabric_hybrid/memfabric_hybrid/mem_scan.py",
+      "source_commit": "4bad3e24285bf835e242365ff09c2c2db34d862ef",
+      "sha256": "7eeffc19e7c65f34968a7eba29388accb92c51a04392c1d65ca8b1be28681354",
+      "modified": false
+    },
+    "hccs_test_a3": {
+      "path": "artifacts/hccs_test_a3.py",
+      "source": "本工具实现；通信模型依据容器内 CANN 9.1 HCCL Test README 的单节点集合通信与正确性测试语义",
+      "source_reference": "/usr/local/Ascend/cann-9.1.0/tools/hccl_test/README.md",
+      "sha256": "9c2f067acfe8e1ea0861fa18276fe4b8a76ab90a1d1f01917311c606f558019c",
+      "modified": true
+    }
+  }
+}
