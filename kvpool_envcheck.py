@@ -155,6 +155,7 @@ def version_text(value: str) -> str:
 
 
 def run_memory_scan(script: Path, min_segment_mb: int) -> Dict[str, Any]:
+    """执行一次 mem_scan.py 扫描并提取全局容量和诊断信息。"""
     rc, out, err = run_cmd([sys.executable, str(script), "-m", str(min_segment_mb)], timeout=600)
     matches = re.findall(r"Total free\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*GB", out)
     total_mb = float(matches[-1]) * 1024 if matches else None
@@ -181,6 +182,7 @@ def run_memory_scan(script: Path, min_segment_mb: int) -> Dict[str, Any]:
 
 
 def probe_a3_memory_scan(managed_memory_mb: int) -> Dict[str, Any]:
+    """按 1GB 优先、2MB 回退的策略检测 A3 全局可用纳管内存。"""
     script_name = "mem_scan.py"
     script = ROOT / "artifacts" / script_name
     base = {
@@ -193,6 +195,7 @@ def probe_a3_memory_scan(managed_memory_mb: int) -> Dict[str, Any]:
     if not script.exists():
         return {**base, "failure_kind": "capability", "available_memory_mb": None, "matched_granularity_mb": None, "error": "A3扫描脚本缺失", "scans": {}}
 
+    # 先用 1GB 粒度判断，容量不足但扫描有效时再回退到 2MB 粒度。
     primary = run_memory_scan(script, 1024)
     primary_valid = primary.get("rc") == 0 and primary.get("total_available_mb") is not None
     primary_pass = primary_valid and primary["total_available_mb"] >= managed_memory_mb
@@ -203,6 +206,7 @@ def probe_a3_memory_scan(managed_memory_mb: int) -> Dict[str, Any]:
     fallback_pass = fallback_valid and fallback["total_available_mb"] >= managed_memory_mb
     ok = bool(primary_pass or fallback_pass)
     valid_scan = primary_valid and (primary_pass or fallback_valid)
+    # 结果按全局可用容量比较，不按 NUMA 节点或卡 die 均摊。
     valid_totals = [
         scan["total_available_mb"]
         for scan in (primary, fallback)
@@ -223,6 +227,7 @@ def probe_a3_memory_scan(managed_memory_mb: int) -> Dict[str, Any]:
 
 
 def read_proc_meminfo() -> Dict[str, str]:
+    """读取静态大页相关的 /proc/meminfo 字段。"""
     values: Dict[str, str] = {}
     try:
         for line in Path("/proc/meminfo").read_text(encoding="ascii", errors="replace").splitlines():
@@ -242,6 +247,7 @@ def parse_meminfo_number(value: Optional[str]) -> Optional[int]:
 
 
 def probe_a2_static_hugepages(managed_memory_mb: int) -> Dict[str, Any]:
+    """根据 2MB 静态大页空闲数量检测 A2 全局可用纳管内存。"""
     meminfo = read_proc_meminfo()
     page_size_kb = parse_meminfo_number(meminfo.get("Hugepagesize"))
     total_pages = parse_meminfo_number(meminfo.get("HugePages_Total"))
@@ -270,6 +276,7 @@ def probe_a2_static_hugepages(managed_memory_mb: int) -> Dict[str, Any]:
 
 
 def probe_memory_capacity(hardware: str, managed_memory_mb: int) -> Dict[str, Any]:
+    """按硬件选择 A2 静态大页或 A3 mem_scan 内存检测策略。"""
     if hardware == "A2":
         return probe_a2_static_hugepages(managed_memory_mb)
     if hardware == "A3":
@@ -292,6 +299,7 @@ def is_docker_runtime() -> bool:
 
 
 def probe_docker_prereqs() -> Dict[str, Any]:
+    """检查 Docker 内 NPU 设备、驱动目录和 HCCN 入口是否可用。"""
     devices = sorted(str(path) for path in Path("/dev").glob("davinci*"))
     return {
         "docker": is_docker_runtime(),
@@ -372,6 +380,7 @@ def parse_roce_error_counters(output: str) -> Dict[str, int]:
 
 
 def probe_roce_npu_state(tool: str, npu_id: int, parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """读取单张 NPU 的 RoCE IP、Link、health 和 MTU 静态状态。"""
     commands = {
         "ip": [tool, "-i", str(npu_id), "-ip", "-g"],
         "link": [tool, "-i", str(npu_id), "-link", "-g"],
@@ -434,6 +443,7 @@ def run_roce_ping(tool: str, source: int, target: int, target_ip: str, packet_si
 
 
 def probe_roce_diagnostics(hardware: str, backend: str, link_parameters: Dict[str, Any], local_parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """执行 RoCE 端口静态检查和本机 NPU 卡间动态连通性检查。"""
     result: Dict[str, Any] = {"hardware": hardware, "backend": backend, "npu_states": [], "link": {}, "local": {}}
     tool = find_hccn_tool()
     if not tool:
@@ -451,6 +461,7 @@ def probe_roce_diagnostics(hardware: str, backend: str, link_parameters: Dict[st
         result["local"] = {"ok": False, "executed": False, "failure_kind": "static_check_failed", "error": f"静态端口检查未通过：{error}", "directions": []}
         return result
 
+    # 先检查每张可见 NPU 的端口状态，静态失败时不执行动态卡对测试。
     states = [probe_roce_npu_state(tool, npu_id, link_parameters) for npu_id in npu_ids]
     result["npu_states"] = states
     baseline_failures = [f"NPU {state['npu_id']}: {', '.join(state['failures'])}" for state in states if not state["ok"]]
@@ -470,6 +481,7 @@ def probe_roce_diagnostics(hardware: str, backend: str, link_parameters: Dict[st
     connectivity_ready = not baseline_failures and packet_size is not None
     before: Dict[str, Dict[str, Any]] = {}
     after: Dict[str, Dict[str, Any]] = {}
+    # 静态端口通过后，执行全部有向卡对，并比较测试窗口内的错误计数增量。
     if connectivity_ready:
         before = {str(npu_id): read_roce_error_counters(tool, npu_id) for npu_id in npu_ids}
         timeout_seconds = int(local_parameters["timeout_seconds"])
@@ -666,6 +678,7 @@ def hccs_counter_deltas(before: Dict[str, Dict[str, List[int]]], after: Dict[str
 
 
 def run_hccs_collective(script: Path, world_size: int, elements_per_peer: int, iterations: int, timeout_seconds: int) -> Dict[str, Any]:
+    """运行独立的 HCCL 集合通信测试进程并解析其结果。"""
     argv = [
         sys.executable,
         str(script),
@@ -719,6 +732,7 @@ def run_hccs_collective(script: Path, world_size: int, elements_per_peer: int, i
 
 
 def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[str, Any], dynamic_parameters: Dict[str, Any]) -> Dict[str, Any]:
+    """执行 A3 SIO/HCCS 静态拓扑检查和 HCCL 动态数据通路测试。"""
     result: Dict[str, Any] = {"hardware": hardware, "backend": backend, "static": {}, "dynamic": {}}
     rc, npu_output, npu_err = run_cmd(["npu-smi", "info"], timeout=15)
     topology = parse_npu_topology(npu_output) if rc == 0 else {}
@@ -734,6 +748,7 @@ def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[
         result["dynamic"] = {"ok": False, "executed": False, "failure_kind": "static_check_failed", "error": error}
         return result
 
+    # 先检查每个可见 die 的 HCCS 状态，再校验 card/die 间的静态拓扑关系。
     states, state_failures, capability_failure = query_hccs_states(device_pairs, static_parameters)
     first_npu, first_chip = device_pairs[0]
     topo_rc, topo_out, topo_err = run_cmd(["npu-smi", "info", "-t", "topo", "-i", str(first_npu), "-c", str(first_chip)], timeout=15)
@@ -770,6 +785,7 @@ def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[
         "dies": states,
         "error": "; ".join(failures) if failures else None,
     }
+    # 静态拓扑或链路失败时跳过动态测试，避免重复产生同一阻塞问题。
     if not static_ok:
         result["dynamic"] = {
             "ok": False,
@@ -779,6 +795,7 @@ def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[
         }
         return result
 
+    # 动态测试会独占全部可见 die；存在业务进程时保持保护性跳过。
     processes = parse_npu_processes(npu_output)
     if processes:
         result["dynamic"] = {
@@ -794,6 +811,7 @@ def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[
     if not script.exists():
         result["dynamic"] = {"ok": False, "executed": False, "failure_kind": "capability", "error": "动态测试脚本 artifacts/hccs_test_a3.py 缺失"}
         return result
+    # 动态测试结束后重新读取计数，只判断本次测试窗口内的增量。
     collective = run_hccs_collective(
         script,
         len(device_pairs),
@@ -818,6 +836,7 @@ def probe_hccs_diagnostics(hardware: str, backend: str, static_parameters: Dict[
 
 
 def probe_package_versions(names: List[str]) -> Dict[str, Any]:
+    """读取本次适用规则要求的软件包版本。"""
     versions = {}
     for name in dict.fromkeys(names):
         try:
@@ -828,6 +847,7 @@ def probe_package_versions(names: List[str]) -> Dict[str, Any]:
 
 
 def probe_ssd_storage(path_text: str, backend: str) -> Dict[str, Any]:
+    """根据后端规则检查 SSD Offload 路径类型、挂载和可用性。"""
     if not path_text:
         return {"path": path_text, "backend": backend, "ok": False, "error": "启用 SSD Offload 时必须提供 --ssd-path"}
     path = Path(path_text)
@@ -879,12 +899,14 @@ def probe_ssd_storage(path_text: str, backend: str) -> Dict[str, Any]:
 
 
 def probe_glibc() -> Dict[str, Any]:
+    """读取容器内 glibc 版本及 ldd 诊断信息。"""
     rc, out, err = run_cmd(["ldd", "--version"], timeout=10)
     match = re.search(r"(?i)glibc[^0-9]*(\d+\.\d+)|ldd[^0-9]*(\d+\.\d+)", out or err)
     return {"version": next((item for item in (match.groups() if match else ()) if item), None), "rc": rc, "summary": (out or err)[:300]}
 
 
 def probe_hdk() -> Dict[str, Any]:
+    """从容器可见的驱动、npu-smi 和 Toolkit 信息中读取 HDK/CANN 版本。"""
     sources: List[Dict[str, Any]] = []
     for argv in (["npu-smi", "info"], ["npu-smi", "info", "-t", "board", "-i", "0"]):
         rc, out, err = run_cmd(list(argv), timeout=10)
@@ -924,6 +946,7 @@ def probe_hdk() -> Dict[str, Any]:
 
 
 def probe_kernel() -> Dict[str, Any]:
+    """读取容器所见的 Linux kernel 版本。"""
     rc, out, err = run_cmd(["uname", "-r"])
     return {"value": out if rc == 0 else platform.release(), "rc": rc, "stderr": err}
 
@@ -981,11 +1004,13 @@ def parse_npu_topology(output: str) -> Dict[str, Any]:
 
 
 def probe_hardware(identification: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 npu-smi 设备名称和 die 拓扑识别当前硬件型号。"""
     sources: List[Dict[str, Any]] = []
     rc, out, err = run_cmd(["npu-smi", "info"], timeout=10)
     if out or err:
         sources.append({"source": "npu-smi info", "rc": rc, "output": redact(out or err)})
     topologies = [parse_npu_topology(item["output"]) for item in sources if item["source"] == "npu-smi info"]
+    # 只有全部可见设备同时满足名称和 die 数量要求时才确认硬件。
     matched = set()
     match_details: Dict[str, Any] = {}
     for topology in topologies:
@@ -1064,6 +1089,8 @@ PROBES: Dict[str, Callable[[CheckContext, List[Dict[str, Any]]], Dict[str, Any]]
 
 
 def validate_catalog(catalog: Dict[str, Any]) -> None:
+    """校验规则目录结构、适用范围和 evaluator 所需运行参数。"""
+    # 目录基础字段和全局支持范围
     if catalog.get("schema_version") != "7.1":
         raise CatalogError("仅支持 rules.json schema_version=7.1")
     for field in ("supported_hardware", "supported_backends", "supported_link_types", "supported_deployment_modes", "rules"):
@@ -1078,6 +1105,8 @@ def validate_catalog(catalog: Dict[str, Any]) -> None:
         raise CatalogError("hardware_identification 必须是已声明硬件的映射")
     if set(identification) != set(catalog["supported_hardware"]):
         raise CatalogError("hardware_identification 必须覆盖全部已声明硬件")
+
+    # 硬件识别配置
     for hardware, spec in identification.items():
         patterns = spec.get("name_patterns") if isinstance(spec, dict) else None
         if not isinstance(patterns, list) or not patterns or not all(isinstance(pattern, str) and pattern for pattern in patterns):
@@ -1091,6 +1120,8 @@ def validate_catalog(catalog: Dict[str, Any]) -> None:
         if dies_per_npu is not None and (not isinstance(dies_per_npu, int) or isinstance(dies_per_npu, bool) or dies_per_npu <= 0):
             raise CatalogError(f"hardware_identification.{hardware}.dies_per_npu 必须是正整数")
     ids = set()
+
+    # 规则公共字段、适用范围和修复定义
     for rule in catalog["rules"]:
         required = ("id", "problem", "impact", "hardware", "backends", "scope", "blocking", "probe", "evaluator", "parameters", "evidence_method", "remediation")
         missing = [field for field in required if field not in rule]
@@ -1144,6 +1175,8 @@ def validate_catalog(catalog: Dict[str, Any]) -> None:
             raise CatalogError(f"规则 {rule['id']} 必须限定 link_types=[roce]")
         if rule.get("feature") and rule.get("feature") == rule.get("exclude_feature"):
             raise CatalogError(f"规则 {rule['id']} 不能同时要求和排除同一 feature")
+
+        # evaluator 专属运行参数
         required_parameters = {
             "hccs_static": ("same_card_relation", "cross_card_relations", "required_health", "require_complete_lanes", "require_positive_speed"),
             "hccs_dynamic": ("collective", "elements_per_peer", "iterations", "timeout_seconds", "required_retry_error_delta"),
@@ -1204,6 +1237,7 @@ def validate_catalog(catalog: Dict[str, Any]) -> None:
                 raise CatalogError(f"规则 {rule['id']} 的 parameters.timeout_seconds 必须是正整数")
             if not isinstance(packet_loss, (int, float)) or isinstance(packet_loss, bool) or packet_loss < 0:
                 raise CatalogError(f"规则 {rule['id']} 的 parameters.required_packet_loss_percent 必须是非负数")
+    # probe 与 evaluator 的配对关系
     for probe_name, required_evaluators in {
         "roce_diagnostics": {"roce_link", "roce_local"},
         "hccs_diagnostics": {"hccs_static", "hccs_dynamic"},
@@ -1232,6 +1266,7 @@ def feature_applies(rule: Dict[str, Any], ssd_offload: bool) -> bool:
 
 
 def validate_inputs(catalog: Dict[str, Any], hardware_arg: str, backend_arg: str, link_type_arg: str, deployment_mode_arg: str) -> Tuple[str, str, str, str, Dict[str, Any]]:
+    """校验命令行输入并确认 --hardware 与当前环境硬件一致。"""
     backend = backend_arg.strip().lower()
     if backend not in catalog["supported_backends"]:
         raise InputError(f"--backend={backend_arg!r} 不在适用范围 {','.join(catalog['supported_backends'])} 内")
@@ -1301,6 +1336,7 @@ def build_version_evidence(rule: Dict[str, Any], probe: Dict[str, Any], raw_vers
 
 
 def evaluate_version(rule: Dict[str, Any], probes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """按规则中的版本比较条件判定通用版本依赖。"""
     params = rule["parameters"]
     probe = probes[rule["probe"]]
     value_text = str(probe.get(params.get("value_key", "version")) or "")
@@ -1325,6 +1361,7 @@ def evaluate_version(rule: Dict[str, Any], probes: Dict[str, Any]) -> Optional[D
 
 
 def evaluate_kernel_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """按部署模式和版本门限判定 Linux kernel 依赖。"""
     probe = probes[rule["probe"]]
     deployment_mode = probe.get("deployment_mode")
     required_deployment_modes = rule.get("deployment_modes", [])
@@ -1350,6 +1387,7 @@ def evaluate_kernel_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) ->
 
 
 def evaluate_hdk_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """按 hardware/backend 矩阵判定 HDK 版本和兼容路径。"""
     probe = probes[rule["probe"]]
     hardware = probe.get("hardware")
     backend = probe.get("backend")
@@ -1406,6 +1444,7 @@ def evaluate_hdk_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Di
 
 
 def evaluate_memory_scan(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 A2 静态大页或 A3 mem_scan 证据判定纳管内存场景。"""
     probe = probes["memory_scan"]
     status = "PASS" if probe.get("ok") else "BLOCK"
     target_mb = probe.get("managed_memory_mb")
@@ -1458,6 +1497,7 @@ def evaluate_memory_scan(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[s
 
 
 def evaluate_docker_prereqs(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据规则目录判定 Docker 设备、驱动和 HCCN 入口是否齐备。"""
     probe = probes["docker_prereqs"]
     missing_all = [key for key in rule["parameters"]["required_all"] if not probe.get(key)]
     failed_any = [group for group in rule["parameters"]["required_any"] if not any(probe.get(key) for key in group)]
@@ -1473,6 +1513,7 @@ def evaluate_docker_prereqs(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dic
 
 
 def evaluate_manual_confirmation(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """生成无法自动取得外部设备版本时的人工确认结果。"""
     evidence = {
         "automatic_detection": False,
         "required_confirmation": rule["parameters"].get("required_confirmation", rule["evidence_method"]),
@@ -1482,6 +1523,7 @@ def evaluate_manual_confirmation(rule: Dict[str, Any], probes: Dict[str, Any]) -
 
 
 def evaluate_package_version(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """判定规则要求的软件包是否安装且版本满足门限。"""
     name = rule["parameters"]["package"]
     version = probes["package_versions"]["versions"].get(name)
     threshold = rule["parameters"].get("threshold")
@@ -1499,6 +1541,7 @@ def evaluate_package_version(rule: Dict[str, Any], probes: Dict[str, Any]) -> Di
 
 
 def evaluate_ssd_storage(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 SSD 探测证据判定当前后端的 Offload 存储条件。"""
     probe = probes["ssd_storage"]
     status = "PASS" if probe.get("ok") else "BLOCK"
     detail = f"SSD 路径={probe.get('path')}; 后端={probe.get('backend')}"
@@ -1508,6 +1551,7 @@ def evaluate_ssd_storage(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[s
 
 
 def evaluate_roce_link(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 RoCE NPU 端口静态状态判定设备侧链路是否就绪。"""
     probe = probes["roce_diagnostics"]
     link = probe["link"]
     status = "PASS" if link.get("ok") else "BLOCK"
@@ -1529,6 +1573,7 @@ def evaluate_roce_link(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str
 
 
 def evaluate_roce_local(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据本机有向卡对 ping 和错误计数增量判定 RoCE 动态通路。"""
     probe = probes["roce_diagnostics"]
     local = probe["local"]
     if not local.get("executed", True) and local.get("failure_kind") == "static_check_failed":
@@ -1560,6 +1605,7 @@ def evaluate_roce_local(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[st
 
 
 def evaluate_hccs_static(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 HCCS 静态拓扑、health、lane 和速率证据判定节点内链路。"""
     static = probes["hccs_diagnostics"]["static"]
     status = "PASS" if static.get("ok") else "BLOCK"
     detail = (
@@ -1576,6 +1622,7 @@ def evaluate_hccs_static(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[s
 
 
 def evaluate_hccs_dynamic(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
+    """根据 HCCL 动态测试和 HCCS 错误计数增量判定动态互联场景。"""
     dynamic = probes["hccs_diagnostics"]["dynamic"]
     if not dynamic.get("executed", True):
         status = "NOT_EXECUTED"
@@ -1637,6 +1684,7 @@ EVALUATORS: Dict[str, Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[s
 
 
 def build_probe_plan(rules: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """按 probe 将适用 Docker 规则分组，供共享探测执行。"""
     plan: Dict[str, List[Dict[str, Any]]] = {}
     for rule in rules:
         if rule["scope"] == "docker":
@@ -1659,22 +1707,32 @@ PROBE_LABELS = {
 
 
 def collect_check_results(catalog: Dict[str, Any], context: CheckContext) -> List[Dict[str, Any]]:
-    rules = [rule for rule in catalog["rules"] if applies(rule, context.hardware, context.backend, context.link_type, context.deployment_mode) and feature_applies(rule, context.ssd_offload)]
-    probe_plan = build_probe_plan(rules)
+    """筛选适用规则，合并执行 probe，并生成问题场景结果。"""
+    # 先筛选本次硬件、后端、链路、部署模式和功能开关适用的规则。
+    applicable_rules = [
+        rule for rule in catalog["rules"]
+        if applies(rule, context.hardware, context.backend, context.link_type, context.deployment_mode)
+        and feature_applies(rule, context.ssd_offload)
+    ]
+
+    # 再按 probe 合并执行，多个规则共享一次底层探测。
+    probe_plan = build_probe_plan(applicable_rules)
     progress = context.progress or ProgressReporter(False)
-    probes = {}
+    probe_results = {}
     total = len(probe_plan)
     for index, (name, probe_rules) in enumerate(probe_plan.items(), start=1):
         rule_ids = ",".join(rule["id"] for rule in probe_rules)
         label = f"{rule_ids} {PROBE_LABELS.get(name, name)}"
         with progress.stage(label, index, total):
-            probes[name] = PROBES[name](context, probe_rules)
+            probe_results[name] = PROBES[name](context, probe_rules)
+
+    # 最后按规则顺序将探测结果转换为问题场景结果。
     check_results = []
-    for rule in rules:
+    for rule in applicable_rules:
         if rule["scope"] == "host":
             result = make_record(rule, "NOT_EXECUTED", {}, "当前工具仅支持 Docker；该场景标记为 host，不在容器内执行")
         else:
-            result = EVALUATORS[rule["evaluator"]](rule, probes)
+            result = EVALUATORS[rule["evaluator"]](rule, probe_results)
         if result is not None:
             check_results.append(result)
     return check_results
@@ -1691,6 +1749,7 @@ def is_memory_capacity_shortage(record: Dict[str, Any]) -> bool:
 
 
 def fix_memory_with_drop_caches(rule: Dict[str, Any], context: CheckContext, record: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """在满足 A3 容量修复条件时执行 Drop Cache 并复测内存容量。"""
     action: Dict[str, Any] = {
         "id": record["id"],
         "type": "drop_caches_then_rescan",
@@ -1700,6 +1759,7 @@ def fix_memory_with_drop_caches(rule: Dict[str, Any], context: CheckContext, rec
         "operation": {"sync": None, "drop_caches": {"path": "/proc/sys/vm/drop_caches", "value": 3}},
         "after_evidence": None,
     }
+    # 只有 A3 扫描确认容量不足时才允许执行 Drop Cache，其他情况保持人工处理。
     if not is_memory_capacity_shortage(record):
         if record.get("evidence", {}).get("method") == "a2_static_hugepages":
             action["type"] = "manual_static_hugepages"
@@ -1722,6 +1782,7 @@ def fix_memory_with_drop_caches(rule: Dict[str, Any], context: CheckContext, rec
         action.update(status="FAILED", message=f"无法写入 /proc/sys/vm/drop_caches，未完成修复：{exc}；请调整容器权限后复测，无法处理时排空业务并重启 host。")
         return record, action
 
+    # 修复后的扫描结果替换原场景结果，动作记录同时保留前后证据。
     after_probe = probe_memory_capacity(context.hardware, context.managed_memory_mb)
     after_record = evaluate_memory_scan(rule, {"memory_scan": after_probe})
     action["after_evidence"] = after_probe
@@ -1735,6 +1796,7 @@ def fix_memory_with_drop_caches(rule: Dict[str, Any], context: CheckContext, rec
 
 
 def execute_fix(catalog: Dict[str, Any], context: CheckContext, check_results: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """执行已授权的本地修复并返回最终场景结果和动作记录。"""
     rules = {rule["id"]: rule for rule in catalog["rules"]}
     final_results = list(check_results)
     actions: List[Dict[str, Any]] = []
@@ -1742,6 +1804,7 @@ def execute_fix(catalog: Dict[str, Any], context: CheckContext, check_results: L
     for index, record in enumerate(check_results):
         if record["status"] not in ("BLOCK", "MANUAL_REQUIRED", "WARN"):
             continue
+        # 当前仅有明确支持的 remediation 执行实际动作，其余统一记录为 MANUAL。
         remediation = record["remediation"]
         with progress.stage(f"修复处理 {record['id']}"):
             if remediation["type"] == "drop_caches_then_rescan":
@@ -1772,6 +1835,7 @@ def result_exit_code(check_results: List[Dict[str, Any]]) -> int:
 
 
 def build_summary(check_results: List[Dict[str, Any]], exit_code: int) -> Dict[str, Any]:
+    """根据场景结果生成总体状态、计数和阻塞项摘要。"""
     blockers = [result for result in check_results if is_blocking_result(result)]
     automatic_blockers = [result for result in blockers if result["status"] == "BLOCK"]
     warnings = [result for result in check_results if result["status"] == "WARN"]
@@ -1799,11 +1863,13 @@ def format_argument_value(value: Any) -> str:
 
 
 def render_text(result: Dict[str, Any], canonical_result_path: Optional[Path] = None) -> str:
+    """将结构化检测结果渲染为面向使用者的 TEXT 报告。"""
     statuses = ("BLOCK", "MANUAL_REQUIRED", "WARN", "PASS", "UNKNOWN", "NOT_EXECUTED", "NOT_APPLICABLE")
     counts = {status: sum(1 for record in result["check_results"] if record["status"] == status) for status in statuses}
     summary = result["summary"]
     arguments = result["invocation"]["arguments"]
     repair = result["repair"]
+    # 报告头部先展示时间和本次最终生效参数。
     lines = [
         f"kvpool 环境检测报告 v{result['tool_version']} | run_id={result['run_id']}",
         "=" * 72,
@@ -1823,6 +1889,7 @@ def render_text(result: Dict[str, Any], canonical_result_path: Optional[Path] = 
         if repair["actions"]:
             lines.extend(["", "修复执行结果："])
             lines.extend(f"- {item['id']} {item['status']}: {item['message']}" for item in repair["actions"])
+    # 汇总建议只展示尚未执行修复的阻塞项和警告，避免与修复结果重复。
     blockers = [record for record in result["check_results"] if is_blocking_result(record)]
     warnings = [record for record in result["check_results"] if record["status"] == "WARN"]
     if blockers and not repair["requested"]:
@@ -1871,6 +1938,7 @@ def render_text(result: Dict[str, Any], canonical_result_path: Optional[Path] = 
 
 
 def write_output_bundle(output_dir: Path, result: Dict[str, Any]) -> Tuple[Path, Path]:
+    """使用同一 run_id 写入 JSON 完整结果和 TEXT 检查报告。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     output_dir = output_dir.resolve()
     prefix = f"kvpool_envcheck_{result['run_id']}"
@@ -1931,6 +1999,7 @@ def write_panorama(path: Path, catalog: Dict[str, Any]) -> None:
 
 
 def load_catalog(path: Path) -> Dict[str, Any]:
+    """读取并校验 rules.json，返回可用于检测的规则目录。"""
     try:
         catalog = json.loads(read_utf8(path))
     except (OSError, json.JSONDecodeError) as exc:
@@ -1940,6 +2009,7 @@ def load_catalog(path: Path) -> Dict[str, Any]:
 
 
 def build_parser(catalog_data: Dict[str, Any]) -> argparse.ArgumentParser:
+    """根据规则目录构造检测、输出、修复和规则管理参数。"""
     hardware_metavar = "{" + ",".join(catalog_data["supported_hardware"]) + "}"
     backend_metavar = "{" + ",".join(catalog_data["supported_backends"]) + "}"
     link_type_metavar = "{" + ",".join(catalog_data["supported_link_types"]) + "}"
@@ -2002,30 +2072,49 @@ def preparse_catalog_path(argv: List[str]) -> Path:
     return args.catalog
 
 
+def load_cli_catalog(argv: List[str]) -> Tuple[Dict[str, Any], argparse.ArgumentParser]:
+    """读取用户指定的规则目录，并构造使用该目录的完整 parser。"""
+    catalog_path = preparse_catalog_path(argv)
+    catalog = load_catalog(catalog_path)
+    return catalog, build_parser(catalog)
+
+
+def run_catalog_command(args: argparse.Namespace, catalog: Dict[str, Any]) -> Optional[int]:
+    """执行规则管理命令；未请求管理命令时返回 None。"""
+    if args.validate_catalog:
+        print(f"catalog valid: schema={catalog['schema_version']} rules={len(catalog['rules'])}")
+        return 0
+    if args.list_rules:
+        for rule in catalog["rules"]:
+            print(f"{rule['id']}\t{rule['problem']}\t{'BLOCK' if rule['blocking'] else 'WARN/PASS'}")
+        return 0
+    if args.describe_rule:
+        rule = next((item for item in catalog["rules"] if item["id"] == args.describe_rule), None)
+        if rule is None:
+            raise InputError(f"未知问题 ID: {args.describe_rule}")
+        print(json.dumps(rule, ensure_ascii=False, indent=2))
+        return 0
+    if args.sync_panorama:
+        write_panorama(args.sync_panorama, catalog)
+        print(f"规则全景已同步: {args.sync_panorama}")
+        return 0
+    return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    """解析命令行参数并执行规则管理或环境检测流程。"""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     try:
-        catalog_path = preparse_catalog_path(raw_argv)
-        catalog = load_catalog(catalog_path)
-        parser = build_parser(catalog)
+        # 读取规则目录并据此构造支持范围动态变化的命令行解析器。
+        catalog, parser = load_cli_catalog(raw_argv)
         args = parser.parse_args(raw_argv)
-        if args.validate_catalog:
-            print(f"catalog valid: schema={catalog['schema_version']} rules={len(catalog['rules'])}")
-            return 0
-        if args.list_rules:
-            for rule in catalog["rules"]:
-                print(f"{rule['id']}\t{rule['problem']}\t{'BLOCK' if rule['blocking'] else 'WARN/PASS'}")
-            return 0
-        if args.describe_rule:
-            rule = next((item for item in catalog["rules"] if item["id"] == args.describe_rule), None)
-            if rule is None:
-                raise InputError(f"未知问题 ID: {args.describe_rule}")
-            print(json.dumps(rule, ensure_ascii=False, indent=2))
-            return 0
-        if args.sync_panorama:
-            write_panorama(args.sync_panorama, catalog)
-            print(f"规则全景已同步: {args.sync_panorama}")
-            return 0
+
+        # 规则查询、校验和文档同步命令到此结束，不进入环境检测流程。
+        catalog_exit_code = run_catalog_command(args, catalog)
+        if catalog_exit_code is not None:
+            return catalog_exit_code
+
+        # 校验运行位置、必填参数、功能参数和硬件型号一致性。
         progress = ProgressReporter.from_mode(args.progress)
         effective_progress = "always" if progress.enabled else "never"
         with progress.stage("输入与硬件校验"):
@@ -2038,14 +2127,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.ssd_path and not args.ssd_offload:
                 raise InputError("--ssd-path 只能与 --ssd-offload 同时使用")
             hardware, backend, link_type, deployment_mode, _hardware_identification = validate_inputs(catalog, args.hardware, args.backend, args.link_type, args.deployment_mode)
+
+        # 执行适用场景的探测并形成修复前汇总。
         context = CheckContext(hardware=hardware, backend=backend, managed_memory_mb=args.managed_memory_mb, deployment_mode=deployment_mode, link_type=link_type, ssd_offload=args.ssd_offload, ssd_path=args.ssd_path, progress=progress)
         check_results = collect_check_results(catalog, context)
         before_exit_code = result_exit_code(check_results)
         before_summary = build_summary(check_results, before_exit_code)
+
+        # 只有显式 --fix 时才执行已授权的本地修复，并以复测结果作为最终结果。
         if args.fix:
             check_results, actions = execute_fix(catalog, context, check_results)
         else:
             actions = []
+
+        # 构建包含输入、汇总、场景结果、修复记录和参考资料的一次性结果模型。
         exit_code = result_exit_code(check_results)
         now = datetime.datetime.now(datetime.timezone.utc)
         timestamp = int(now.timestamp())
@@ -2066,6 +2161,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             }
         }
         result = {"tool_version": TOOL_VERSION, "result_schema_version": RESULT_SCHEMA_VERSION, "run_id": run_id, "timestamp": timestamp, "timestamp_iso": now.isoformat(), "invocation": invocation, "summary": build_summary(check_results, exit_code), "repair": build_repair_summary(args.fix, actions, before_summary), "check_results": check_results, "reference_documents": REFERENCE_DOCUMENTS, "exit_code": exit_code}
+
+        # 有输出目录时同时落盘 JSON/TEXT，否则只回显 TEXT 报告。
         if args.output_dir:
             result_path, report_path = write_output_bundle(args.output_dir, result)
             sys.stdout.write(render_completion(result, result_path, report_path))
