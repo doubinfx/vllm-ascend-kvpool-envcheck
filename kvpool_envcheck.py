@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CATALOG = ROOT / "rules.json"
-TOOL_VERSION = "14.1.1"
+TOOL_VERSION = "14.1.2"
 RESULT_SCHEMA_VERSION = "13.1"
 REFERENCE_DOCUMENTS = [
     {
@@ -1201,8 +1201,7 @@ def validate_catalog(catalog: Dict[str, Any]) -> None:
                 if requirement["hardware"] not in rule["hardware"] or requirement["backend"] not in rule["backends"]:
                     raise CatalogError(f"规则 {rule['id']} 的 HDK 组合超出适用范围: {combination[0]}/{combination[1]}")
                 minimum = version_tuple(str(requirement["minimum"]))
-                preferred = version_tuple(str(requirement.get("preferred", ""))) if requirement.get("preferred") else None
-                if minimum is None or (preferred is not None and compare_version(preferred, minimum) < 0):
+                if minimum is None:
                     raise CatalogError(f"规则 {rule['id']} 的 HDK 版本门限无效: {combination[0]}/{combination[1]}")
             expected = {(hardware, backend) for hardware in rule["hardware"] for backend in rule["backends"]}
             if set(combinations) != expected:
@@ -1387,7 +1386,7 @@ def evaluate_kernel_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) ->
 
 
 def evaluate_hdk_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Dict[str, Any]:
-    """按 hardware/backend 矩阵判定 HDK 版本和兼容路径。"""
+    """按 hardware/backend 矩阵判定 HDK 最低版本。"""
     probe = probes[rule["probe"]]
     hardware = probe.get("hardware")
     backend = probe.get("backend")
@@ -1411,8 +1410,6 @@ def evaluate_hdk_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Di
         "hardware": hardware,
         "backend": backend,
         "minimum_version": minimum_text,
-        "preferred_version": requirement.get("preferred"),
-        "compatibility_dependency": requirement.get("compatibility_dependency"),
     }
     if current is None:
         return make_record(
@@ -1425,16 +1422,7 @@ def evaluate_hdk_requirement(rule: Dict[str, Any], probes: Dict[str, Any]) -> Di
     status = "PASS" if compare_version(current, minimum) >= 0 else "BLOCK"
     normalized = version_text(raw_version)
     detected = raw_version + (f"（比较值={normalized}）" if raw_version != normalized else "")
-    preferred_text = requirement.get("preferred")
-    if status == "PASS" and preferred_text and compare_version(current, version_tuple(str(preferred_text)) or (0,)) < 0:
-        detail = (
-            f"检测到 HDK={detected}，匹配>={minimum_text}兼容路径；"
-            f"同时要求 {requirement['compatibility_dependency']}，该软件依赖由独立场景判定"
-        )
-    elif status == "PASS" and preferred_text:
-        detail = f"检测到 HDK={detected}，匹配>={preferred_text}路径"
-    else:
-        detail = f"检测到 HDK={detected}，当前 {hardware}/{backend} 要求>={minimum_text}"
+    detail = f"检测到 HDK={detected}，当前 {hardware}/{backend} 要求>={minimum_text}"
     result = make_record(rule, status, evidence, detail)
     if status == "BLOCK":
         result["remediation"]["description"] = (
@@ -2016,7 +2004,7 @@ def build_parser(catalog_data: Dict[str, Any]) -> argparse.ArgumentParser:
     deployment_mode_metavar = "{" + ",".join(catalog_data["supported_deployment_modes"]) + "}"
     parser = argparse.ArgumentParser(
         description=(
-            "vLLM-Ascend kvpool 离线部署环境检测 v14.1.1\n"
+            "vLLM-Ascend kvpool 离线部署环境检测 v14.1.2\n"
             "仅支持在 Docker 容器内运行；检测过程不联网，默认不修改环境。"
         ),
         epilog=(

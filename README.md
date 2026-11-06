@@ -1,4 +1,4 @@
-# vLLM-Ascend kvpool 环境检测工具 v14.1.1
+# vLLM-Ascend kvpool 环境检测工具 v14.1.2
 
 该工具用于 vLLM-Ascend kvpool 部署前环境检查：识别依赖问题、输出阻塞项和修复建议，并在显式授权后执行当前支持的本地修复。
 

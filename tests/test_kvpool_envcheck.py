@@ -62,7 +62,9 @@ class KvpoolEnvcheckTests(unittest.TestCase):
             ("A2", "memcache", "25.4.9", "BLOCK"),
             ("A2", "memcache", "25.5.0", "PASS"),
             ("A2", "mooncake", "25.5.0", "PASS"),
-            ("A3", "memcache", "25.9.9", "BLOCK"),
+            ("A3", "memcache", "25.4.9", "BLOCK"),
+            ("A3", "memcache", "25.5.0", "PASS"),
+            ("A3", "memcache", "25.9.9", "PASS"),
             ("A3", "memcache", "26.0.rc2", "PASS"),
             ("A3", "mooncake", "25.4.9", "BLOCK"),
             ("A3", "mooncake", "25.5.0", "PASS"),
@@ -74,12 +76,8 @@ class KvpoolEnvcheckTests(unittest.TestCase):
                 {"hdk": {"hardware": hardware, "backend": backend, "version": value, "version_source": source}},
             )
             self.assertEqual(result["status"], expected)
-        compatible = MODULE.evaluate_hdk_requirement(
-            rule,
-            {"hdk": {"hardware": "A3", "backend": "mooncake", "version": "25.5.0", "version_source": source}},
-        )
-        self.assertIn("兼容路径", compatible["detail"])
-        self.assertIn("mooncake-transfer-engine-npu>=0.3.11.post1", compatible["detail"])
+        for requirement in rule["parameters"]["requirements"]:
+            self.assertEqual(set(requirement), {"hardware", "backend", "minimum"})
 
     def test_raw_version_is_preserved(self):
         result = MODULE.evaluate_hdk_requirement(

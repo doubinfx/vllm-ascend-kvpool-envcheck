@@ -1,6 +1,6 @@
 # vLLM-Ascend kvpool 环境检测工具设计
 
-版本：v14.1.1  
+版本：v14.1.2
 规则事实源：`rules.json`（schema `7.1`）  
 结果协议：`13.1`
 
@@ -34,7 +34,7 @@
 ### 版本与公共依赖
 
 - CANN 统一要求 `>=9.1.0`。
-- HDK-001 按硬件/后端矩阵判定：A2 两个后端最低 25.5；A3 memcache 最低 26.0；A3 mooncake 支持 25.5 兼容路径，但需同时满足独立的 Mooncake 软件依赖，26.0 及以上为主路径。
+- HDK-001 按硬件/后端矩阵判定：A2、A3 的 memcache/mooncake 后端最低 HDK 均为 25.5；Mooncake 软件依赖由独立场景判定。
 - KERNEL-001 只针对 A3 + memcache 多节点；单节点返回 `NOT_APPLICABLE`，不阻塞单节点部署。
 - Docker 公共依赖检查设备、`npu-smi`、Davinci 设备、驱动目录，以及 `/etc/hccn.conf` 或可执行 `hccn_tool` 至少一个入口。
 
@@ -87,7 +87,7 @@ python3 kvpool_envcheck.py --sync-panorama DESIGN.md
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | MEM-001 | 纳管内存检查未通过 | - | 后端无法确认并注册目标纳管内存容量。 | A3使用官方 mem_scan.py 按1GB、2MB粒度扫描；A2读取Hugepagesize=2048kB的静态大页空闲数量，并将全局可用容量与目标值比较 | `memory_scan` `{}` | 根据检测详情恢复扫描能力或释放内存后复测。 | 是 | A2,A3 | memcache,mooncake | all | all | docker | 已实现 |
 | CANN-001 | CANN 版本低于 9.1.0 | - | 池化内存语义特性依赖不满足，kvpool 不可用。 | Docker 内 CANN Toolkit 安装信息和 ASCEND_TOOLKIT_HOME | `version_range` `{"value_key":"cann_version","operator":"lt","threshold":"9.1.0","unknown_status":"BLOCK"}` | 使用与硬件、镜像和发行版匹配的 CANN >=9.1.0 离线包重建/更新镜像后复测。 | 是 | A2,A3 | memcache,mooncake | all | all | docker | 已实现 |
-| HDK-001 | HDK 版本不满足当前硬件和后端要求 | - | HDK 版本低于当前硬件和后端的最低要求，可能导致可管理内存不足或 kvpool 初始化失败。 | 读取 Docker 内可见的 npu-smi/driver version.info，并按 hardware/backend 选择最低 HDK 版本；A3 + mooncake 的 25.5 兼容路径同时要求 Mooncake 软件依赖满足版本要求 | `hdk_requirement` `{"requirements":[{"hardware":"A2","backend":"memcache","minimum":"25.5.0"},{"hardware":"A2","backend":"mooncake","minimum":"25.5.0"},{"hardware":"A3","backend":"memcache","minimum":"26.0.0"},{"hardware":"A3","backend":"mooncake","minimum":"25.5.0","preferred":"26.0.0","compatibility_dependency":"mooncake-transfer-engine-npu>=0.3.11.post1"}],"unknown_status":"BLOCK"}` | 将 host HDK 升级到检测详情要求的最低版本，更新 Docker 挂载后重启容器并复测。 | 是 | A2,A3 | memcache,mooncake | all | all | docker | 已实现 |
+| HDK-001 | HDK 版本不满足当前硬件和后端要求 | - | HDK 版本低于当前硬件和后端的最低要求，可能导致可管理内存不足或 kvpool 初始化失败。 | 读取 Docker 内可见的 npu-smi/driver version.info，并按 hardware/backend 选择最低 HDK 版本；Mooncake 软件依赖由独立场景判定 | `hdk_requirement` `{"requirements":[{"hardware":"A2","backend":"memcache","minimum":"25.5.0"},{"hardware":"A2","backend":"mooncake","minimum":"25.5.0"},{"hardware":"A3","backend":"memcache","minimum":"25.5.0"},{"hardware":"A3","backend":"mooncake","minimum":"25.5.0"}],"unknown_status":"BLOCK"}` | 将 host HDK 升级到检测详情要求的最低版本，更新 Docker 挂载后重启容器并复测。 | 是 | A2,A3 | memcache,mooncake | all | all | docker | 已实现 |
 | KERNEL-001 | Linux kernel 版本低于 6.6.0 | - | 多节点部署时kvpool可能失效；单节点部署不受该依赖影响。 | 在 Docker 内执行 uname -r，读取容器所见的 host Linux kernel 版本 | `kernel_requirement` `{"threshold":"6.6.0","unknown_status":"BLOCK"}` | 在 host 维护流程升级 Linux kernel 到 >=6.6.0；升级完成后重建或重启容器并复测。 | 是 | A3 | memcache | all | multi-node | docker | 已实现 |
 | LINGQU-001 | L1 1520 灵衢 CC 版本需人工确认 >= 1.5.0 | - | A3 + memcache/mooncake 场景可能建链失败，kvpool 失效。 | 无法自动检测到对应版本，需要通过运维登录L1 1520交换机或在BMC纳管界面确认版本是否满足要求 | `manual_confirmation` `{"required_confirmation":"无法自动检测到对应版本，需要通过运维登录L1 1520交换机或在BMC纳管界面确认版本是否满足要求"}` | 登录1520和在BMC纳管界面，先查看L1 1520 灵衢 CC 版本，低于 1.5.0 时由网络设备管理员升级。 | 是 | A3 | memcache,mooncake | hccs | multi-node | docker | 已实现 |
 | HCCS-001 | A3 节点内 SIO/HCCS 链路未就绪 | A3 NPU 节点内互联；卡内 SIO 与跨卡 HCCS 静态拓扑和链路状态；当前主机内全部可见 A3 卡和 die；不包含：动态数据正确性、跨主机通信、L1 1520 灵衢 CC 版本 | A3 节点内 die 间基础互联不可用。 | 遍历全部可见 A3 card/die，检查 SIO/HCCS 拓扑、health、lane 完整性和链路速率 | `hccs_static` `{"coverage":"all_visible_cards_and_dies","same_card_relation":"SIO","cross_card_relations":["HCCS","HCCS_SW"],"required_health":"OK","require_complete_lanes":true,"require_positive_speed":true}` | 根据失败 card/die 和 lane 检查对应 SIO/HCCS 物理链路，修复后复测。 | 是 | A3 | memcache,mooncake | hccs | all | docker | 已实现 |

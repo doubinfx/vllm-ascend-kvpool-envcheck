@@ -56,12 +56,12 @@
         "requirements": [
           {"hardware": "A2", "backend": "memcache", "minimum": "25.5.0"},
           {"hardware": "A2", "backend": "mooncake", "minimum": "25.5.0"},
-          {"hardware": "A3", "backend": "memcache", "minimum": "26.0.0"},
-          {"hardware": "A3", "backend": "mooncake", "minimum": "25.5.0", "preferred": "26.0.0", "compatibility_dependency": "mooncake-transfer-engine-npu>=0.3.11.post1"}
+          {"hardware": "A3", "backend": "memcache", "minimum": "25.5.0"},
+          {"hardware": "A3", "backend": "mooncake", "minimum": "25.5.0"}
         ],
         "unknown_status": "BLOCK"
       },
-      "evidence_method": "读取 Docker 内可见的 npu-smi/driver version.info，并按 hardware/backend 选择最低 HDK 版本；A3 + mooncake 的 25.5 兼容路径同时要求 Mooncake 软件依赖满足版本要求",
+      "evidence_method": "读取 Docker 内可见的 npu-smi/driver version.info，并按 hardware/backend 选择最低 HDK 版本；Mooncake 软件依赖由独立场景判定",
       "remediation": {"type": "manual_host_upgrade", "description": "将 host HDK 升级到检测详情要求的最低版本，更新 Docker 挂载后重启容器并复测。", "requires_root": true, "requires_reboot": true}
     },
     {
